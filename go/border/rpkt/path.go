@@ -17,13 +17,16 @@
 package rpkt
 
 import (
+	"hash"
 	"time"
 
-	"github.com/netsec-ethz/scion/go/border/conf"
+	"github.com/netsec-ethz/scion/go/border/ifstate"
 	"github.com/netsec-ethz/scion/go/lib/assert"
 	"github.com/netsec-ethz/scion/go/lib/common"
+	"github.com/netsec-ethz/scion/go/lib/crypto"
 	"github.com/netsec-ethz/scion/go/lib/scmp"
 	"github.com/netsec-ethz/scion/go/lib/spath"
+	"github.com/netsec-ethz/scion/go/proto"
 )
 
 // validatePath validates the path header.
@@ -51,7 +54,7 @@ func (rp *RtrPkt) validatePath(dirFrom Dir) *common.Error {
 		return common.NewErrorData("Hop field is VERIFY_ONLY", sdata)
 	}
 	// A forward-only Hop Field cannot be used for local delivery.
-	if rp.hopF.ForwardOnly && rp.dstIA == conf.C.IA {
+	if rp.hopF.ForwardOnly && rp.dstIA == rp.Ctx.Conf.IA {
 		sdata := scmp.NewErrData(scmp.C_Path, scmp.T_P_DeliveryFwdOnly, rp.mkInfoPathOffsets())
 		return common.NewErrorData("Hop field is FORWARD_ONLY", sdata)
 	}
@@ -63,7 +66,9 @@ func (rp *RtrPkt) validatePath(dirFrom Dir) *common.Error {
 		return common.NewErrorData("Hop field expired", sdata, "expiry", hopfExpiry)
 	}
 	// Verify the Hop Field MAC.
-	err := rp.hopF.Verify(conf.C.HFGenBlock, rp.infoF.TsInt, rp.getHopFVer(dirFrom))
+	hfmac := rp.Ctx.Conf.HFMacPool.Get().(hash.Hash)
+	err := rp.hopF.Verify(hfmac, rp.infoF.TsInt, rp.getHopFVer(dirFrom))
+	rp.Ctx.Conf.HFMacPool.Put(hfmac)
 	if err != nil && err.Desc == spath.ErrorHopFBadMac {
 		err.Data = scmp.NewErrData(scmp.C_Path, scmp.T_P_BadMac, rp.mkInfoPathOffsets())
 	}
@@ -77,14 +82,14 @@ func (rp *RtrPkt) validateLocalIF(ifid *spath.IntfID) *common.Error {
 	if ifid == nil {
 		return common.NewError("validateLocalIF: Interface is nil")
 	}
-	if _, ok := conf.C.TopoMeta.IFMap[int(*ifid)]; !ok {
+	if _, ok := rp.Ctx.Conf.TopoMeta.IFMap[int(*ifid)]; !ok {
 		// No such interface.
 		sdata := scmp.NewErrData(scmp.C_Path, scmp.T_P_BadIF, rp.mkInfoPathOffsets())
 		return common.NewErrorData("Unknown IF", sdata, "ifid", ifid)
 	}
-	conf.C.IFStates.RLock()
-	info, ok := conf.C.IFStates.M[*ifid]
-	conf.C.IFStates.RUnlock()
+	ifstate.S.RLock()
+	info, ok := ifstate.S.M[*ifid]
+	ifstate.S.RUnlock()
 	if !ok || info.P.Active() || rp.DirTo == DirSelf {
 		// Either the interface isn't revoked, or the packet is to this
 		// router, in which case revocations are ignored to allow communication
@@ -92,6 +97,19 @@ func (rp *RtrPkt) validateLocalIF(ifid *spath.IntfID) *common.Error {
 		return nil
 	}
 	// Interface is revoked.
+	var revInfo proto.RevInfo
+	var err error
+	if revInfo, err = info.P.RevInfo(); err != nil {
+		rp.Warn("Couldn't load RevInfo for revoked interface", "err", err, "ifid", *ifid)
+		return nil
+	}
+	// Check that we have a revocation for the current epoch.
+	if !crypto.VerifyHashTreeEpoch(revInfo.Epoch()) {
+		// If the BR does not have a revocation for the current epoch, it considers
+		// the interface as active until it receives a new revocation.
+		ifstate.Activate(*ifid)
+		return nil
+	}
 	sinfo := scmp.NewInfoRevocation(
 		uint16(rp.CmnHdr.CurrInfoF), uint16(rp.CmnHdr.CurrHopF), uint16(*ifid),
 		rp.DirFrom == DirExternal, info.RawRev)
@@ -396,7 +414,7 @@ func (rp *RtrPkt) checkSetCurrIF(ifid *spath.IntfID) (*spath.IntfID, *common.Err
 	if ifid == nil {
 		return nil, common.NewError("No interface found")
 	}
-	if _, ok := conf.C.Net.IFs[*ifid]; !ok {
+	if _, ok := rp.Ctx.Conf.Net.IFs[*ifid]; !ok {
 		return nil, common.NewError("Unknown interface", "ifid", *ifid)
 	}
 	rp.ifCurr = ifid

@@ -18,9 +18,10 @@
 package rpkt
 
 import (
+	"hash"
+
 	log "github.com/inconshreveable/log15"
 
-	"github.com/netsec-ethz/scion/go/border/conf"
 	"github.com/netsec-ethz/scion/go/lib/common"
 	"github.com/netsec-ethz/scion/go/lib/spath"
 	"github.com/netsec-ethz/scion/go/lib/spkt"
@@ -55,6 +56,14 @@ func (o *rOneHopPath) HopF() (HookResult, *spath.HopField, *common.Error) {
 		// instead.
 		return HookContinue, nil, nil
 	}
+	currHopF, err := spath.HopFFromRaw(o.rp.Raw[o.rp.CmnHdr.CurrHopF:])
+	if err != nil {
+		return HookError, nil, err
+	}
+	if currHopF.Ingress != 0 || currHopF.Egress != 0 {
+		// The current hop field has already been generated.
+		return HookContinue, nil, nil
+	}
 	infoF, err := o.rp.InfoF()
 	if err != nil {
 		return HookError, nil, err
@@ -62,9 +71,11 @@ func (o *rOneHopPath) HopF() (HookResult, *spath.HopField, *common.Error) {
 	// Retrieve the previous HopF, create a new HopF for this AS, and write it into the path header.
 	prevIdx := o.rp.CmnHdr.CurrHopF - spath.HopFieldLength
 	prevHof := o.rp.Raw[prevIdx+1 : o.rp.CmnHdr.CurrHopF]
-	inIF := conf.C.Net.IFAddrMap[o.rp.Ingress.Dst.String()]
+	inIF := o.rp.Ctx.Conf.Net.IFAddrMap[o.rp.Ingress.Dst.String()]
 	hopF := spath.NewHopField(o.rp.Raw[o.rp.CmnHdr.CurrHopF:], inIF, 0)
-	mac, err := hopF.CalcMac(conf.C.HFGenBlock, infoF.TsInt, prevHof)
+	hfmac := o.rp.Ctx.Conf.HFMacPool.Get().(hash.Hash)
+	mac, err := hopF.CalcMac(hfmac, infoF.TsInt, prevHof)
+	o.rp.Ctx.Conf.HFMacPool.Put(hfmac)
 	if err != nil {
 		return HookError, nil, err
 	}

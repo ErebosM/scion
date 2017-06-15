@@ -21,6 +21,7 @@ import (
 	log "github.com/inconshreveable/log15"
 	logext "github.com/inconshreveable/log15/ext"
 
+	"github.com/netsec-ethz/scion/go/border/rctx"
 	"github.com/netsec-ethz/scion/go/lib/addr"
 	"github.com/netsec-ethz/scion/go/lib/common"
 	"github.com/netsec-ethz/scion/go/lib/l4"
@@ -28,8 +29,9 @@ import (
 )
 
 // RtrPktFromScnPkt creates an RtrPkt from an spkt.ScnPkt.
-func RtrPktFromScnPkt(sp *spkt.ScnPkt, dirTo Dir) (*RtrPkt, *common.Error) {
+func RtrPktFromScnPkt(sp *spkt.ScnPkt, dirTo Dir, ctx *rctx.Ctx) (*RtrPkt, *common.Error) {
 	rp := NewRtrPkt()
+	rp.Ctx = ctx
 	totalLen := sp.TotalLen()
 	hdrLen := sp.HdrLen()
 	rp.TimeIn = monotime.Now()
@@ -46,18 +48,18 @@ func RtrPktFromScnPkt(sp *spkt.ScnPkt, dirTo Dir) (*RtrPkt, *common.Error) {
 	rp.CmnHdr.CurrHopF = uint8(hdrLen)  // Updated later as necessary.
 	rp.CmnHdr.NextHdr = common.L4None   // Updated later as necessary.
 	// Fill in address header and indexes.
-	rp.idxs.srcIA = spkt.CmnHdrLen
-	rp.srcIA = sp.SrcIA
-	rp.idxs.srcHost = rp.idxs.srcIA + addr.IABytes
-	rp.srcHost = sp.SrcHost
-	rp.idxs.dstIA = rp.idxs.srcHost + rp.srcHost.Size()
+	rp.idxs.dstIA = spkt.CmnHdrLen
 	rp.dstIA = sp.DstIA
-	rp.idxs.dstHost = rp.idxs.dstIA + addr.IABytes
+	rp.idxs.srcIA = rp.idxs.dstIA + addr.IABytes
+	rp.srcIA = sp.SrcIA
+	rp.idxs.dstHost = rp.idxs.srcIA + addr.IABytes
 	rp.dstHost = sp.DstHost
-	rp.srcIA.Write(rp.Raw[rp.idxs.srcIA:])
-	copy(rp.Raw[rp.idxs.srcHost:], rp.srcHost.Pack())
+	rp.idxs.srcHost = rp.idxs.dstHost + rp.dstHost.Size()
+	rp.srcHost = sp.SrcHost
 	rp.dstIA.Write(rp.Raw[rp.idxs.dstIA:])
+	rp.srcIA.Write(rp.Raw[rp.idxs.srcIA:])
 	copy(rp.Raw[rp.idxs.dstHost:], rp.dstHost.Pack())
+	copy(rp.Raw[rp.idxs.srcHost:], rp.srcHost.Pack())
 	// Fill in path
 	rp.idxs.path = spkt.CmnHdrLen + sp.AddrLen()
 	if sp.Path != nil {
@@ -66,12 +68,19 @@ func RtrPktFromScnPkt(sp *spkt.ScnPkt, dirTo Dir) (*RtrPkt, *common.Error) {
 		rp.CmnHdr.CurrHopF = uint8(rp.idxs.path) + sp.Path.HopOff
 	}
 	// Fill in extensions
-	rp.idxs.l4 = hdrLen // Will be updated as necessary by ExtnAddHBH
+	rp.idxs.l4 = hdrLen // Will be updated as necessary by extnAddHBH and extnAddE2E
 	for _, se := range sp.HBHExt {
 		if err := rp.extnAddHBH(se); err != nil {
 			return nil, err
 		}
 	}
+
+	for _, se := range sp.E2EExt {
+		if err := rp.extnAddE2E(se); err != nil {
+			return nil, err
+		}
+	}
+
 	// Fill in L4 Header
 	rp.idxs.pld = hdrLen // Will be updated as necessary by addL4
 	if sp.L4 != nil {

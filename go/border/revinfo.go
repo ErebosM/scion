@@ -22,11 +22,10 @@ import (
 	log "github.com/inconshreveable/log15"
 	"zombiezen.com/go/capnproto2"
 
-	"github.com/netsec-ethz/scion/go/border/conf"
+	"github.com/netsec-ethz/scion/go/border/rctx"
 	"github.com/netsec-ethz/scion/go/border/rpkt"
 	"github.com/netsec-ethz/scion/go/lib/addr"
 	"github.com/netsec-ethz/scion/go/lib/common"
-	"github.com/netsec-ethz/scion/go/lib/l4"
 	"github.com/netsec-ethz/scion/go/lib/log"
 	"github.com/netsec-ethz/scion/go/lib/spkt"
 	"github.com/netsec-ethz/scion/go/proto"
@@ -52,8 +51,8 @@ func (r *Router) RevInfoFwd() {
 		if revInfo == nil {
 			continue
 		}
+		log.Debug("Forwarding revocation", "revInfo", revInfo.Pretty(), "targets", args.Addrs)
 		for _, svcAddr := range args.Addrs {
-			log.Debug("Forwarding revocation.", "target", svcAddr, "revInfo", revInfo)
 			r.fwdRevInfo(revInfo, &svcAddr)
 		}
 	}
@@ -84,30 +83,17 @@ func (r *Router) decodeRevToken(b common.RawBytes) *proto.RevInfo {
 
 // fwdRevInfo forwards RevInfo payloads to a designated local host.
 func (r *Router) fwdRevInfo(revInfo *proto.RevInfo, dstHost addr.HostAddr) {
+	ctx := rctx.Get()
 	// Pick first local address from topology as source.
-	srcAddr := conf.C.Net.LocAddr[0].PublicAddr()
-	// Create base packet
-	rp, err := rpkt.RtrPktFromScnPkt(&spkt.ScnPkt{
-		SrcIA: conf.C.IA, SrcHost: addr.HostFromIP(srcAddr.IP),
-		DstIA: conf.C.IA, DstHost: dstHost,
-		L4: &l4.UDP{SrcPort: uint16(srcAddr.Port), DstPort: 0},
-	}, rpkt.DirLocal)
-	if err != nil {
-		log.Error("Error creating RevInfo packet", err.Ctx...)
-		return
-	}
+	srcAddr := ctx.Conf.Net.LocAddr[0].PublicAddr()
 	scion, pathMgmt, err := proto.NewPathMgmtMsg()
 	if err != nil {
 		log.Error("Error creating PathMgmt payload", err.Ctx...)
 		return
 	}
 	pathMgmt.SetRevInfo(*revInfo)
-	rp.SetPld(&spkt.CtrlPld{SCION: scion})
-	_, err = rp.RouteResolveSVCMulti(*dstHost.(*addr.HostSVC), r.locOutFs[0])
-	if err != nil {
-		log.Error("Unable to route RevInfo packet", err.Ctx...)
-		return
+	if err := r.genPkt(ctx.Conf.IA, *dstHost.(*addr.HostSVC), 0, srcAddr,
+		&spkt.CtrlPld{SCION: scion}); err != nil {
+		log.Error("Error generating RevInfo packet", err.Ctx...)
 	}
-	rp.Route()
-	log.Debug("Forwarded RevInfo")
 }

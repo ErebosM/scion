@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 
-export PYTHONPATH=.
+export PYTHONPATH=python/:.
 
-EXTRA_NOSE_ARGS="--with-xunit --xunit-file=logs/nosetests.xml"
+EXTRA_NOSE_ARGS="-w python/ --with-xunit --xunit-file=logs/nosetests.xml"
 
 # BEGIN subcommand functions
 
 cmd_topology() {
     local zkclean
-    if type -p supervisorctl &>/dev/null; then
-        echo "Shutting down supervisord: $(supervisor/supervisor.sh shutdown)"
-    fi
+    echo "Shutting down supervisord: $(supervisor/supervisor.sh shutdown)"
     mkdir -p logs traces
     [ -e gen ] && rm -r gen
     if [ "$1" = "zkclean" ]; then
@@ -18,7 +16,7 @@ cmd_topology() {
         zkclean="y"
     fi
     echo "Create topology, configuration, and execution files."
-    topology/generator.py "$@" || exit 1
+    python/topology/generator.py "$@" || exit 1
     if [ -n "$zkclean" ]; then
         echo "Deleting all Zookeeper state"
         rm -rf /run/shm/scion-zk
@@ -41,6 +39,7 @@ cmd_run() {
 cmd_stop() {
     echo "Terminating this run of the SCION infrastructure"
     supervisor/supervisor.sh stop all
+    find /run/shm/dispatcher /run/shm/sciond -type s -print0 | xargs -r0 rm -v
 }
 
 cmd_status() {
@@ -82,7 +81,7 @@ cmd_coverage(){
 py_cover() {
     nosetests3 ${EXTRA_NOSE_ARGS} --with-cov --cov-report html "$@"
     echo
-    echo "Python coverage report here: file://$PWD/htmlcov/index.html"
+    echo "Python coverage report here: file://$PWD/python/htmlcov/index.html"
 }
 
 go_cover() {
@@ -92,18 +91,27 @@ go_cover() {
 cmd_lint() {
     set -o pipefail
     local ret=0
-    for i in . topology/mininet sub/web; do
+    py_lint
+    ret=$((ret+$?))
+    go_lint
+    ret=$((ret+$?))
+    return $ret
+}
+
+py_lint() {
+    local ret=0
+    for i in python python/mininet sub/web; do
       [ -d "$i" ] || continue
       echo "Linting $i"
       local cmd="flake8"
-      [ "$i" = "topology/mininet" ] && cmd="python2 -m flake8"
+      [ "$i" = "python/mininet" ] && cmd="python2 -m flake8"
       echo "============================================="
       ( cd "$i" && $cmd --config flake8.ini . ) | sort -t: -k1,1 -k2n,2 -k3n,3 || ((ret++))
     done
     return $ret
 }
 
-cmd_golint() {
+go_lint() {
     ( cd go && make -s lint )
 }
 
@@ -118,9 +126,9 @@ cmd_version() {
 
 cmd_build() {
     if [ "$1" == "bypass" ]; then
-        USER_OPTS=-DBYPASS_ROUTERS make -s all install
+        USER_OPTS=-DBYPASS_ROUTERS make -s
     else
-        make -s all install
+        make -s
     fi
 }
 
@@ -139,7 +147,7 @@ cmd_sciond() {
     GENDIR=gen/ISD${ISD}/AS${AS}/endhost
     [ -d "$GENDIR" ] || { echo "Topology directory for $ISD-$AS doesn't exist: $GENDIR"; exit 1; }
     APIADDR="/run/shm/sciond/${ISD}-${AS}.sock"
-    PYTHONPATH=. bin/sciond --addr $ADDR --api-addr $APIADDR sd${ISD}-${AS} $GENDIR &
+    PYTHONPATH=python/:. bin/sciond --addr $ADDR --api-addr $APIADDR sd${ISD}-${AS} $GENDIR &
     echo "Sciond running for $ISD-$AS (pid $!)"
     wait
     exit $?
@@ -180,7 +188,8 @@ COMMAND="$1"
 shift
 
 case "$COMMAND" in
-    coverage|help|lint|golint|run|stop|status|test|topology|version|build|clean|sciond)
+    coverage|help|lint|run|stop|status|test|topology|version|build|clean|sciond)
         "cmd_$COMMAND" "$@" ;;
+    start) cmd_run "$@" ;;
     *)  cmd_help; exit 1 ;;
 esac

@@ -17,11 +17,19 @@
 package metrics
 
 import (
+	"flag"
+	"io"
+	"net"
 	"net/http"
 
+	log "github.com/inconshreveable/log15"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/netsec-ethz/scion/go/lib/common"
 )
+
+var promAddr = flag.String("prom", "127.0.0.1:1280", "Address to export prometheus metrics on")
 
 // Declare prometheus metrics to export.
 var (
@@ -127,11 +135,20 @@ func init() {
 	prometheus.MustRegister(OutputProcessTime)
 }
 
-// Export accepts a slice of addresses in the form of "ip:port", and exports
-// promethetus metrics on each address over http.
-func Export(addresses []string) {
+var servers map[string]io.Closer
+
+func init() {
+	servers = make(map[string]io.Closer)
 	http.Handle("/metrics", promhttp.Handler())
-	for _, addr := range addresses {
-		go http.ListenAndServe(addr, nil)
+}
+
+// Export handles exposing prometheus metrics.
+func Start() *common.Error {
+	ln, err := net.Listen("tcp", *promAddr)
+	if err != nil {
+		return common.NewError("Unable to bind prometheus metrics port", "err", err)
 	}
+	log.Info("Exporting prometheus metrics", "addr", *promAddr)
+	go http.Serve(ln, nil)
+	return nil
 }

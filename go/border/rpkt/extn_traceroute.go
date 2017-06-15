@@ -23,7 +23,6 @@ import (
 
 	log "github.com/inconshreveable/log15"
 
-	"github.com/netsec-ethz/scion/go/border/conf"
 	"github.com/netsec-ethz/scion/go/lib/addr"
 	"github.com/netsec-ethz/scion/go/lib/common"
 	"github.com/netsec-ethz/scion/go/lib/spkt"
@@ -48,7 +47,7 @@ func rTracerouteFromRaw(rp *RtrPkt, start, end int) (*rTraceroute, *common.Error
 	t := &rTraceroute{rp: rp, raw: rp.Raw[start:end]}
 	t.NumHops = t.raw[0]
 	// Ignore subheader line
-	t.TotalHops = uint8(len(t.raw)-common.ExtnFirstLineLen) / common.LineLen
+	t.TotalHops = uint8((len(t.raw) - common.ExtnFirstLineLen) / common.LineLen)
 	t.Logger = rp.Logger.New("ext", "traceroute")
 	return t, nil
 }
@@ -56,9 +55,9 @@ func rTracerouteFromRaw(rp *RtrPkt, start, end int) (*rTraceroute, *common.Error
 // Add creates a new traceroute entry directly to the underlying buffer.
 func (t *rTraceroute) Add(entry *spkt.TracerouteEntry) *common.Error {
 	if t.NumHops == t.TotalHops {
-		return common.NewError("Header already full", log.Ctx{"entries": t.NumHops})
+		return common.NewError("Header already full", "entries", t.NumHops)
 	}
-	offset := common.ExtnFirstLineLen + common.LineLen*t.NumHops
+	offset := common.ExtnFirstLineLen + common.LineLen*int(t.NumHops)
 	entry.IA.Write(t.raw[offset:])
 	offset += addr.IABytes
 	common.Order.PutUint16(t.raw[offset:], entry.IfID)
@@ -105,10 +104,11 @@ func (t *rTraceroute) Process() (HookResult, *common.Error) {
 	// Take the current time in milliseconds, and truncate it to 16bits.
 	ts := (time.Now().UnixNano() / 1000) % (1 << 16)
 	entry := spkt.TracerouteEntry{
-		IA: *conf.C.IA, IfID: uint16(*t.rp.ifCurr), TimeStamp: uint16(ts),
+		IA: *t.rp.Ctx.Conf.IA, IfID: uint16(*t.rp.ifCurr), TimeStamp: uint16(ts),
 	}
 	if err := t.Add(&entry); err != nil {
-		t.Error("Unable to add entry", err)
+		err.Ctx = append(err.Ctx, "raw", t.rp.Raw)
+		t.Error("Unable to add entry", err.Ctx...)
 	}
 	// Update the raw buffer with the number of hops.
 	t.raw[0] = t.NumHops

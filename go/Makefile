@@ -31,9 +31,9 @@ lint:
 	@echo "======> go vet"
 	go vet ${LOCAL_PKGS}
 
-deps_proto: proto
+deps_proto: deps proto
 
-deps: vendor/.deps.stamp
+deps: vendor/.deps.stamp ../proto/go.capnp
 
 vendor/.deps.stamp: vendor/vendor.json
 	@echo "$$(date -Iseconds) Syncing deps"; govendor sync -v
@@ -44,6 +44,9 @@ vendor/.deps.stamp: vendor/vendor.json
 	    exit 1; \
 	fi;
 	touch $@
+
+../proto/go.capnp:
+	cp vendor/zombiezen.com/go/capnproto2/std/go.capnp ../proto/go.capnp
 
 depspurge:
 	rm -f vendor/.deps.stamp
@@ -57,8 +60,8 @@ bin: deps_proto
 	GOBIN=${LOCAL_GOBIN} govendor install --tags "$(GOTAGS)" -v +local,program
 
 libs: deps_proto
-	govendor install -v +local,^program
+	govendor install --tags "$(GOTAGS)" -v +local,^program
 
 hsr: libs
-	GOBIN=${LOCAL_GOBIN} go install -v -tags hsr ./border/...
+	GOBIN=${LOCAL_GOBIN} go install -v -tags "$(GOTAGS) hsr" ./border/...
 	sudo setcap cap_dac_read_search,cap_dac_override,cap_sys_admin,cap_net_raw+ep ../bin/border

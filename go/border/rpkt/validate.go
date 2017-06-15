@@ -17,7 +17,6 @@
 package rpkt
 
 import (
-	"github.com/netsec-ethz/scion/go/border/conf"
 	"github.com/netsec-ethz/scion/go/lib/addr"
 	"github.com/netsec-ethz/scion/go/lib/common"
 	"github.com/netsec-ethz/scion/go/lib/scmp"
@@ -32,22 +31,22 @@ const (
 // Validate performs basic validation of a packet, including calling any
 // registered validation hooks.
 func (rp *RtrPkt) Validate() *common.Error {
-	intf, ok := conf.C.Net.IFs[*rp.ifCurr]
+	intf, ok := rp.Ctx.Conf.Net.IFs[*rp.ifCurr]
 	if !ok {
 		return common.NewError(errCurrIntfInvalid, "ifid", *rp.ifCurr)
 	}
 	// XXX(kormat): the rest of the common header is checked by the parsing phase.
+	if !addr.HostTypeCheck(rp.CmnHdr.DstType) {
+		sdata := scmp.NewErrData(scmp.C_CmnHdr, scmp.T_C_BadDstType, nil)
+		return common.NewErrorData("Unsupported destination address type", sdata,
+			"type", rp.CmnHdr.DstType)
+	}
 	if !addr.HostTypeCheck(rp.CmnHdr.SrcType) || rp.CmnHdr.SrcType == addr.HostTypeSVC {
 		// Either the source address type isn't supported, or it is an SVC
 		// address (which is forbidden).
 		sdata := scmp.NewErrData(scmp.C_CmnHdr, scmp.T_C_BadSrcType, nil)
 		return common.NewErrorData("Unsupported source address type", sdata,
 			"type", rp.CmnHdr.SrcType)
-	}
-	if !addr.HostTypeCheck(rp.CmnHdr.DstType) {
-		sdata := scmp.NewErrData(scmp.C_CmnHdr, scmp.T_C_BadDstType, nil)
-		return common.NewErrorData("Unsupported destination address type", sdata,
-			"type", rp.CmnHdr.DstType)
 	}
 	if int(rp.CmnHdr.TotalLen) != len(rp.Raw) {
 		sdata := scmp.NewErrData(scmp.C_CmnHdr, scmp.T_C_BadPktLen,

@@ -26,13 +26,13 @@ import (
 
 	log "github.com/inconshreveable/log15"
 
+	"github.com/netsec-ethz/scion/go/border/rctx"
 	"github.com/netsec-ethz/scion/go/lib/addr"
 	"github.com/netsec-ethz/scion/go/lib/common"
 	"github.com/netsec-ethz/scion/go/lib/l4"
 	"github.com/netsec-ethz/scion/go/lib/scmp"
 	"github.com/netsec-ethz/scion/go/lib/spath"
 	"github.com/netsec-ethz/scion/go/lib/spkt"
-	"github.com/netsec-ethz/scion/go/proto"
 )
 
 // pktBufSize is the maxiumum size of a packet buffer.
@@ -42,19 +42,12 @@ const pktBufSize = 1 << 16
 // callbacks is an anonymous struct used for functions supplied by the router
 // for various processing tasks.
 var callbacks struct {
-	locOutFs   map[int]OutputFunc
-	intfOutFs  map[spath.IntfID]OutputFunc
-	ifStateUpd func(proto.IFStateInfos)
-	revTokenF  func(RevTokenCallbackArgs)
+	revTokenF func(RevTokenCallbackArgs)
 }
 
 // Init takes callback functions provided by the router and stores them for use
 // by the rpkt package.
-func Init(locOut map[int]OutputFunc, intfOut map[spath.IntfID]OutputFunc,
-	ifStateUpd func(proto.IFStateInfos), revTokenF func(RevTokenCallbackArgs)) {
-	callbacks.locOutFs = locOut
-	callbacks.intfOutFs = intfOut
-	callbacks.ifStateUpd = ifStateUpd
+func Init(revTokenF func(RevTokenCallbackArgs)) {
 	callbacks.revTokenF = revTokenF
 }
 
@@ -89,14 +82,14 @@ type RtrPkt struct {
 	// idxs contains a set of indexes into Raw which point to the start of certain sections of the
 	// packet. (PARSE)
 	idxs packetIdxs
-	// srcIA is the source ISD-AS. (PARSE, only if needed)
-	srcIA *addr.ISD_AS
-	// srcHost is the source Host. (PARSE, only if needed)
-	srcHost addr.HostAddr
 	// dstIA is the destination ISD-AS. (PARSE)
 	dstIA *addr.ISD_AS
+	// srcIA is the source ISD-AS. (PARSE, only if needed)
+	srcIA *addr.ISD_AS
 	// dstHost is the destination Host. (PARSE, only if dstIA is local)
 	dstHost addr.HostAddr
+	// srcHost is the source Host. (PARSE, only if needed)
+	srcHost addr.HostAddr
 	// infoF is the current Info Field, if any. (PARSE)
 	infoF *spath.InfoField
 	// hopF is the current Hop Field, if any. (PARSE)
@@ -128,7 +121,12 @@ type RtrPkt struct {
 	// Logger is used to log messages associated with a packet. The Id field is automatically
 	// included in the output.
 	log.Logger
+	// The current router context to process this packet.
+	Ctx *rctx.Ctx
 }
+
+// Check that RtrPkt implements rctx.OutputObj
+var _ rctx.OutputObj = (*RtrPkt)(nil)
 
 func NewRtrPkt() *RtrPkt {
 	r := &RtrPkt{}
@@ -166,7 +164,7 @@ func (d Dir) String() string {
 	}
 }
 
-// addrIFPair contains the overlay source/destination addresses, as well as the
+// addrIFPair contains the overlay destination/source addresses, as well as the
 // list of associated interface IDs.
 type addrIFPair struct {
 	Dst   *net.UDPAddr
@@ -174,23 +172,20 @@ type addrIFPair struct {
 	IfIDs []spath.IntfID
 }
 
-// OutputFunc is the type of callback required for sending a packet.
-type OutputFunc func(*RtrPkt, *net.UDPAddr)
-
 // EgressPair contains the output function to send a packet with, along with an
 // overlay destination address.
 type EgressPair struct {
-	F   OutputFunc
+	F   rctx.OutputFunc
 	Dst *net.UDPAddr
 }
 
 // packetIdxs provides offsets into a packet buffer to the start of various
 // fields. It is used heavily for parsing packets.
 type packetIdxs struct {
-	srcIA      int
-	srcHost    int
 	dstIA      int
+	srcIA      int
 	dstHost    int
+	srcHost    int
 	path       int
 	nextHdrIdx hdrIdx
 	hbhExt     []extnIdx
@@ -224,16 +219,16 @@ func (rp *RtrPkt) Reset() {
 	rp.Raw = rp.Raw[:cap(rp.Raw)-1]
 	rp.DirFrom = DirUnset
 	rp.DirTo = DirUnset
-	rp.Ingress.Src = nil
 	rp.Ingress.Dst = nil
+	rp.Ingress.Src = nil
 	rp.Ingress.IfIDs = nil
 	rp.Egress = rp.Egress[:0]
 	rp.IncrementedPath = false
 	rp.idxs = packetIdxs{}
-	rp.srcIA = nil
-	rp.srcHost = nil
 	rp.dstIA = nil
+	rp.srcIA = nil
 	rp.dstHost = nil
+	rp.srcHost = nil
 	rp.infoF = nil
 	rp.hopF = nil
 	rp.ifCurr = nil
@@ -246,6 +241,7 @@ func (rp *RtrPkt) Reset() {
 	rp.pld = nil
 	rp.hooks = hooks{}
 	rp.SCMPError = false
+	rp.Ctx = nil
 }
 
 // ToScnPkt converts this RtrPkt into an spkt.ScnPkt. The verify argument
@@ -255,16 +251,16 @@ func (rp *RtrPkt) Reset() {
 func (rp *RtrPkt) ToScnPkt(verify bool) (*spkt.ScnPkt, *common.Error) {
 	var err *common.Error
 	sp := &spkt.ScnPkt{}
-	if sp.SrcIA, err = rp.SrcIA(); err != nil {
-		return nil, err
-	}
-	if sp.SrcHost, err = rp.SrcHost(); err != nil {
-		return nil, err
-	}
 	if sp.DstIA, err = rp.DstIA(); err != nil {
 		return nil, err
 	}
+	if sp.SrcIA, err = rp.SrcIA(); err != nil {
+		return nil, err
+	}
 	if sp.DstHost, err = rp.DstHost(); err != nil {
+		return nil, err
+	}
+	if sp.SrcHost, err = rp.SrcHost(); err != nil {
 		return nil, err
 	}
 	// spath.Path uses offsets relative to the start of its buffer, whereas the
@@ -310,7 +306,7 @@ func (rp *RtrPkt) GetRaw(blk scmp.RawBlock) common.RawBytes {
 	case scmp.RawCmnHdr:
 		return rp.Raw[:spkt.CmnHdrLen]
 	case scmp.RawAddrHdr:
-		return rp.Raw[rp.idxs.srcIA:rp.idxs.path]
+		return rp.Raw[rp.idxs.dstIA:rp.idxs.path]
 	case scmp.RawPathHdr:
 		return rp.Raw[rp.idxs.path:rp.CmnHdr.HdrLen]
 	case scmp.RawExtHdrs:
@@ -322,17 +318,23 @@ func (rp *RtrPkt) GetRaw(blk scmp.RawBlock) common.RawBytes {
 	return nil
 }
 
+// Bytes returns the raw bytes of the RtrPkt. Needed to implement rctx.OutputObj
+// interface.
+func (rp *RtrPkt) Bytes() common.RawBytes {
+	return rp.Raw
+}
+
 func (rp *RtrPkt) String() string {
 	// Pre-fetch required attributes, deliberately ignoring errors so as to
 	// display as much information as can be gathered.
-	rp.SrcIA()
-	rp.SrcHost()
 	rp.DstIA()
+	rp.SrcIA()
 	rp.DstHost()
+	rp.SrcHost()
 	rp.InfoF()
 	rp.HopF()
-	return fmt.Sprintf("Id: %v Dir from/to: %v/%v Src: %v %v Dst: %v %v\n  InfoF: %v\n  HopF: %v",
-		rp.Id, rp.DirFrom, rp.DirTo, rp.srcIA, rp.srcHost, rp.dstIA, rp.dstHost, rp.infoF, rp.hopF)
+	return fmt.Sprintf("Id: %v Dir from/to: %v/%v Dst: %v %v Src: %v %v\n  InfoF: %v\n  HopF: %v",
+		rp.Id, rp.DirFrom, rp.DirTo, rp.dstIA, rp.dstHost, rp.srcIA, rp.srcHost, rp.infoF, rp.hopF)
 }
 
 // ErrStr is a small utility method to combine an error message with a string

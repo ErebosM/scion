@@ -1,4 +1,0 @@
-iputils-ping
-mininet
-unzip
-wget

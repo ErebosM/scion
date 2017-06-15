@@ -21,13 +21,13 @@
 package hsr
 
 /*
-#cgo CFLAGS: -I../../../lib
+#cgo CFLAGS: -I../../../c/lib
 #cgo LDFLAGS: -lhsr -ldpdk -lmnl -lzlog -lscion
 #include <stdint.h>
 #include <string.h>
 #include <netinet/in.h>
 #include <zlog.h>
-#include "libhsr/hsr_interface.h"
+#include "hsr/hsr_interface.h"
 
 typedef struct sockaddr_in saddr_in;
 typedef struct sockaddr_in6 saddr_in6;
@@ -126,8 +126,8 @@ func NewHSR() *HSR {
 	h := HSR{}
 	// Allocate storage for each RouterPacket's src/dest fields.
 	for i := range h.InPkts {
-		h.InPkts[i].src = &C.saddr_storage{}
 		h.InPkts[i].dst = &C.saddr_storage{}
+		h.InPkts[i].src = &C.saddr_storage{}
 	}
 	return &h
 }
@@ -184,7 +184,7 @@ func SendPacket(dst *net.UDPAddr, portID int, buf common.RawBytes) *common.Error
 	cp.buflen = C.size_t(len(buf))
 	// Use pre-converted C source address from AddrMs.
 	cp.src = &AddrMs[portID].CAddr
-	// Convery destination address from Go to C.
+	// Convert destination address from Go to C.
 	cp.dst = &C.saddr_storage{}
 	udpAddrToSaddr(dst, cp.dst)
 	cp.port_id = C.uint8_t(portID)
